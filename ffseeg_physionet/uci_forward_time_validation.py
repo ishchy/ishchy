@@ -36,7 +36,7 @@ def load_data(archive: Path):
         if len(names) != 1:
             raise RuntimeError(f"Expected exactly one ARFF in UCI ZIP; got {names}")
         arff_bytes = z.read(names[0])
-    raw, _ = arff.loadarff(io.BytesIO(arff_bytes))
+    raw, _ = arff.loadarff(io.StringIO(arff_bytes.decode('utf-8')))
     frame = pd.DataFrame(raw)
     for name in frame.columns:
         if frame[name].dtype == object:
