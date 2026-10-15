@@ -1,0 +1,89 @@
+name: FFSEEG residual held-out subject exploratory benchmark
+
+on:
+  push:
+    branches:
+      - "experiments/**"
+    paths:
+      - ".github/workflows/physionet_residual_tune.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      OMP_NUM_THREADS: "1"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install CPU training and evaluation dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install numpy==1.26.4 scipy==1.14.1 pandas==2.2.3 scikit-learn==1.5.2
+      - name: Download verified successful real EEG source artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          curl -fL --retry 5 --retry-all-errors --retry-delay 3 \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/artifacts/11911025625/zip" \
+            -o real_eeg_input.zip
+          unzip -t real_eeg_input.zip
+          mkdir -p input
+          unzip -q real_eeg_input.zip -d input
+          test -f input/outputs/physionet_full/RUN_COMPLETE.txt
+          grep -q "Real EEG result" input/outputs/physionet_full/RUN_COMPLETE.txt
+          test -f input/outputs/physionet_full/external_features.csv
+          test -f input/outputs/physionet_full/external_subject_splits.csv
+          test -f input/outputs/physionet_full/external_oof_predictions.csv
+      - name: Run reproducible 109-subject 10-fold sparse residual EEG GNN
+        run: |
+          set -euo pipefail
+          for seed in 24701 24702 24703; do
+            python ffseeg_physionet/physionet_sparse_residual.py \
+              --dataset input/outputs/physionet_full/external_features.csv \
+              --splits input/outputs/physionet_full/external_subject_splits.csv \
+              --baseline input/outputs/physionet_full/external_oof_predictions.csv \
+              --out "outputs/ffseeg_residual_seed$seed" --folds 10 \
+              --variant residual --k 8 --seed "$seed" \
+              2>&1 | tee "residual_seed$seed.log"
+            test -f "outputs/ffseeg_residual_seed$seed/metrics_summary.json"
+          done
+          python ffseeg_physionet/physionet_sparse_residual.py \
+            --dataset input/outputs/physionet_full/external_features.csv \
+            --splits input/outputs/physionet_full/external_subject_splits.csv \
+            --baseline input/outputs/physionet_full/external_oof_predictions.csv \
+            --out outputs/ffseeg_noresidual_seed24701 --folds 10 \
+            --variant noresidual --k 8 --seed 24701 \
+            2>&1 | tee noresidual_seed24701.log
+          test -f outputs/ffseeg_noresidual_seed24701/metrics_summary.json
+      - name: Audit output hashes
+        if: always()
+        run: |
+          find outputs -type f -print0 2>/dev/null | sort -z | xargs -0 -r sha256sum > SHA256SUMS.txt
+      - name: Upload complete outputs or diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffseeg_residual_multiseed_ablation
+          path: |
+            outputs/ffseeg_residual_seed*/
+            outputs/ffseeg_noresidual_seed*/
+            residual_seed*.log
+            noresidual_seed*.log
+            SHA256SUMS.txt
+          if-no-files-found: warn
+          retention-days: 30
