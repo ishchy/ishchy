@@ -1,0 +1,82 @@
+name: UCI EEG strict forward-time 3-fold validation
+
+on:
+  push:
+    branches:
+      - "experiments/uci-forward-time-*"
+    paths:
+      - ".github/workflows/uci_forward_time.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  strict-uci:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Checkout experimental branch
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install frozen CPU environment
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install numpy==1.26.4 pandas==2.2.3 scipy==1.14.1 scikit-learn==1.5.2
+      - name: Download official chronological UCI source ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p inputs outputs
+          curl -fLsS --retry 6 --retry-all-errors --retry-delay 4 \
+            --connect-timeout 25 --max-time 240 \
+            "https://archive.ics.uci.edu/static/public/264/eeg+eye+state.zip" \
+            -o inputs/uci_eeg_eye_state.zip
+          unzip -t inputs/uci_eeg_eye_state.zip
+          sha256sum inputs/uci_eeg_eye_state.zip | tee outputs/RAW_INPUT_SHA256.txt
+      - name: Inspect real input and chronological splits
+        run: |
+          set -euo pipefail
+          python ffseeg_physionet/uci_forward_time_validation.py \
+            --dataset-zip inputs/uci_eeg_eye_state.zip \
+            --out outputs/uci_preflight --smoke \
+            2>&1 | tee uci_preflight.log
+          grep -q "DATA-AND-SPLIT-SMOKE-OK" uci_preflight.log
+      - name: Execute 3-fold forward-in-time seven-model benchmark
+        shell: bash
+        run: |
+          set -euo pipefail
+          python ffseeg_physionet/uci_forward_time_validation.py \
+            --dataset-zip inputs/uci_eeg_eye_state.zip \
+            --out outputs/uci_forward \
+            --epochs 80 --seed 24701 --purge 256 --val-size 1250 \
+            2>&1 | tee uci_training.log
+          grep -q "REAL UCI EEG" outputs/uci_forward/RUN_COMPLETE.txt
+          test -s outputs/uci_forward/predictions.csv
+          test -s outputs/uci_forward/summary.csv
+      - name: Output audit hashes
+        if: always()
+        shell: bash
+        run: |
+          find outputs -type f -print0 2>/dev/null | sort -z | xargs -0 -r sha256sum > SHA256SUMS.txt
+      - name: Upload complete experiment files or failure diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: uci_forward_time_3fold_seven_models
+          path: |
+            outputs/
+            uci_preflight.log
+            uci_training.log
+            SHA256SUMS.txt
+          retention-days: 30
+          if-no-files-found: warn
