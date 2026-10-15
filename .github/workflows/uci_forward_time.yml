@@ -6,6 +6,7 @@ on:
       - "experiments/uci-forward-time-*"
     paths:
       - ".github/workflows/uci_forward_time.yml"
+      - "ffseeg_physionet/uci_forward_time_validation.py"
   workflow_dispatch:
 
 permissions:
