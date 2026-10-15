@@ -51,7 +51,7 @@ jobs:
           test -f input/outputs/physionet_full/external_oof_predictions.csv
       - name: Run reproducible 109-subject 10-fold sparse residual EEG GNN
         run: |
-          set -o pipefail
+          set -euo pipefail
           for seed in 24701 24702 24703; do
             python ffseeg_physionet/physionet_sparse_residual.py \
               --dataset input/outputs/physionet_full/external_features.csv \
@@ -73,14 +73,15 @@ jobs:
       - name: Audit output hashes
         if: always()
         run: |
-          find outputs/ffseeg_residual -type f -print0 2>/dev/null | sort -z | xargs -0 -r sha256sum > SHA256SUMS.txt
+          find outputs -type f -print0 2>/dev/null | sort -z | xargs -0 -r sha256sum > SHA256SUMS.txt
       - name: Upload complete outputs or diagnostic logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ffseeg_residual_multiseed_ablation
           path: |
-            outputs/ffseeg_residual/
+            outputs/ffseeg_residual_seed*/
+            outputs/ffseeg_noresidual_seed*/
             residual_seed*.log
             noresidual_seed*.log
             SHA256SUMS.txt
