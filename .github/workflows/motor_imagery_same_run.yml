@@ -1,0 +1,81 @@
+name: Independent motor imagery T1 vs T2 within-run subject-held-out pilot
+
+on:
+  push:
+    branches:
+      - "experiments/motor-imagery-within-run-*"
+    paths:
+      - ".github/workflows/motor_imagery_same_run.yml"
+      - "ffseeg_physionet/motor_imagery_within_run.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pilot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      PYTHONUNBUFFERED: "1"
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+    steps:
+      - name: Checkout frozen experiment script
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install pinned CPU analysis dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install numpy==1.26.4 scipy==1.14.1 pandas==2.2.3 scikit-learn==1.5.2 mne==1.10.2 edfio
+          python -m pip freeze > PILOT_ENVIRONMENT.txt
+      - name: Static Python code validation
+        run: |
+          set -euo pipefail
+          python -m py_compile ffseeg_physionet/motor_imagery_within_run.py
+      - name: Real EDF event-label and 8-subject preflight (no model accuracy)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python ffseeg_physionet/motor_imagery_within_run.py \
+            --subject-end 8 --folds 4 --cache-dir cache/eegmmidb \
+            --out outputs/preflight --smoke 2>&1 | tee preflight.log
+          grep -q "PILOT-PREFLIGHT-OK" preflight.log
+          test -s outputs/preflight/edf_event_audit.csv
+      - name: Run 24-subject 4-fold five-model within-run imagery pilot
+        shell: bash
+        run: |
+          set -euo pipefail
+          python ffseeg_physionet/motor_imagery_within_run.py \
+            --subject-end 24 --folds 4 --epochs 65 \
+            --cache-dir cache/eegmmidb --out outputs/real_pilot \
+            2>&1 | tee pilot_training.log
+          grep -q "REAL EDF WITHIN-RUN MOTOR IMAGERY" outputs/real_pilot/RUN_COMPLETE.txt
+          test -s outputs/real_pilot/fold_summary.csv
+          test -s outputs/real_pilot/subject_metrics.csv
+          test -s outputs/real_pilot/predictions.csv
+          test -s outputs/real_pilot/paired_subject_exploratory.csv
+      - name: Create output hashes
+        if: always()
+        shell: bash
+        run: |
+          find outputs -type f -print0 2>/dev/null | sort -z | xargs -0 -r sha256sum > SHA256SUMS.txt
+      - name: Upload all real EEG and failure audit artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: motor_imagery_R04_subject_heldout_24pilot
+          path: |
+            outputs/
+            preflight.log
+            pilot_training.log
+            PILOT_ENVIRONMENT.txt
+            SHA256SUMS.txt
+          if-no-files-found: warn
+          retention-days: 30
