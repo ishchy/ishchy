@@ -1,0 +1,119 @@
+name: EEG train-only feature optimization and validation calibration
+
+on:
+  push:
+    branches:
+      - "experiments/train-only-calibration-*"
+    paths:
+      - ".github/workflows/eeg_train_only_calibration.yml"
+      - "ffseeg_physionet/train_only_calibration.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  optimize:
+    strategy:
+      fail-fast: false
+      matrix:
+        dataset: ["uci", "physionet"]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      PYTHONUNBUFFERED: "1"
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+    steps:
+      - name: Checkout exact experiment revision
+        uses: actions/checkout@v4
+      - name: Set up pinned CPU Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install pinned dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install numpy==1.26.4 scipy==1.14.1 pandas==2.2.3 scikit-learn==1.5.2
+      - name: Retrieve official data and verified prior PhysioNet partitions
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p input
+          if [ "${{ matrix.dataset }}" = "physionet" ]; then
+            curl -fLsS --retry 6 --retry-all-errors --retry-delay 4 \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/artifacts/11911025625/zip" \
+              -o input/physionet_verified.zip
+            unzip -t input/physionet_verified.zip
+            unzip -q input/physionet_verified.zip -d input
+            grep -q "Real EEG result" input/outputs/physionet_full/RUN_COMPLETE.txt
+            test -s input/outputs/physionet_full/external_features.csv
+            test -s input/outputs/physionet_full/external_subject_splits.csv
+            sha256sum input/physionet_verified.zip > input_sha256.txt
+          else
+            curl -fLsS --retry 6 --retry-all-errors --retry-delay 4 \
+              "https://archive.ics.uci.edu/static/public/264/eeg+eye+state.zip" \
+              -o input/uci_official.zip
+            unzip -t input/uci_official.zip
+            sha256sum input/uci_official.zip > input_sha256.txt
+          fi
+      - name: Inspect partition integrity (no synthetic results)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.dataset }}" = "physionet" ]; then
+            python ffseeg_physionet/train_only_calibration.py \
+              --dataset physionet \
+              --features input/outputs/physionet_full/external_features.csv \
+              --splits input/outputs/physionet_full/external_subject_splits.csv \
+              --out outputs/preflight --smoke
+          else
+            python ffseeg_physionet/train_only_calibration.py \
+              --dataset uci \
+              --uci-zip input/uci_official.zip \
+              --out outputs/preflight --smoke
+          fi
+      - name: Test train-only feature and loss optimization against fixed threshold
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.dataset }}" = "physionet" ]; then
+            python ffseeg_physionet/train_only_calibration.py \
+              --dataset physionet \
+              --features input/outputs/physionet_full/external_features.csv \
+              --splits input/outputs/physionet_full/external_subject_splits.csv \
+              --out outputs/results --epochs 65 2>&1 | tee training.log
+          else
+            python ffseeg_physionet/train_only_calibration.py \
+              --dataset uci \
+              --uci-zip input/uci_official.zip \
+              --out outputs/results --epochs 65 2>&1 | tee training.log
+          fi
+          test -s outputs/results/comparison_summary.csv
+          test -s outputs/results/validation_chosen_oof_predictions.csv
+          grep -q "REAL EEG TRAIN-ONLY OPTIMIZATION" outputs/results/RUN_COMPLETE.txt
+      - name: Hash audit of all saved outputs
+        if: always()
+        shell: bash
+        run: |
+          find outputs -type f -print0 2>/dev/null | sort -z | xargs -0 -r sha256sum > SHA256SUMS.txt
+      - name: Upload metrics and complete test predictions (or diagnostics)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eeg_feature_calibration_${{ matrix.dataset }}
+          path: |
+            outputs/
+            training.log
+            input_sha256.txt
+            SHA256SUMS.txt
+          if-no-files-found: warn
+          retention-days: 30
