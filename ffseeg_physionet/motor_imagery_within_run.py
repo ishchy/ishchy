@@ -128,8 +128,8 @@ def extract_data(cache,subjects):
                          verbose="ERROR")
         trials=epoch.get_data()
         labels=(epoch.events[:,2]==2).astype(int)
-        if trials.ndim!=3 or trials.shape[1]!=14 or
-            len(labels)!=len(trials):
+        if (trials.ndim!=3 or trials.shape[1]!=14 or
+                len(labels)!=len(trials)):
             raise RuntimeError("Epoch extraction shape mismatch")
         if min(np.bincount(labels,minlength=2))<3:
             raise ValueError(f"Subject S{subject} too few T1/T2 events: {np.bincount(labels,minlength=2)}")
