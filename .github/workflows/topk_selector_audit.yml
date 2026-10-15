@@ -1,0 +1,126 @@
+name: EEG TopK learned vs fixed selector audit
+
+on:
+  push:
+    branches:
+      - "experiments/topk-selection-audit-*"
+    paths:
+      - ".github/workflows/topk_selector_audit.yml"
+      - "ffseeg_physionet/topk_selector_audit.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  selector-audit:
+    strategy:
+      fail-fast: false
+      matrix:
+        dataset: ["physionet", "uci"]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      PYTHONUNBUFFERED: "1"
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+    steps:
+      - name: Checkout exact experiment revision
+        uses: actions/checkout@v4
+      - name: Set up reproducible CPU Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install pinned scientific packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install numpy==1.26.4 scipy==1.14.1 pandas==2.2.3 scikit-learn==1.5.2
+      - name: Download verified real PhysioNet result for matching subject splits
+        if: matrix.dataset == 'physionet'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p input
+          curl -fLsS --retry 5 --retry-all-errors --retry-delay 3 \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/artifacts/11911025625/zip" \
+            -o input/physionet_original.zip
+          unzip -t input/physionet_original.zip
+          unzip -q input/physionet_original.zip -d input
+          grep -q "Real EEG result" input/outputs/physionet_full/RUN_COMPLETE.txt
+          test -s input/outputs/physionet_full/external_features.csv
+          test -s input/outputs/physionet_full/external_subject_splits.csv
+          sha256sum input/physionet_original.zip > input_sha256.txt
+      - name: Download original UCI EEG recording
+        if: matrix.dataset == 'uci'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p input
+          curl -fLsS --retry 6 --retry-all-errors --retry-delay 4 \
+            "https://archive.ics.uci.edu/static/public/264/eeg+eye+state.zip" \
+            -o input/uci_original.zip
+          unzip -t input/uci_original.zip
+          sha256sum input/uci_original.zip > input_sha256.txt
+      - name: Audit partition integrity before training
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.dataset }}" = "physionet" ]; then
+            python ffseeg_physionet/topk_selector_audit.py \
+              --data physionet \
+              --features input/outputs/physionet_full/external_features.csv \
+              --splits input/outputs/physionet_full/external_subject_splits.csv \
+              --out outputs/physionet_preflight --smoke
+          else
+            python ffseeg_physionet/topk_selector_audit.py \
+              --data uci --uci-zip input/uci_original.zip \
+              --out outputs/uci_preflight --smoke
+          fi
+      - name: Compare seven selector ablations with two pre-set seeds
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.dataset }}" = "physionet" ]; then
+            python ffseeg_physionet/topk_selector_audit.py \
+              --data physionet \
+              --features input/outputs/physionet_full/external_features.csv \
+              --splits input/outputs/physionet_full/external_subject_splits.csv \
+              --out outputs/physionet --epochs 65 --seeds 24701 24702 \
+              2>&1 | tee training.log
+            test -s outputs/physionet/subject_paired_tests.csv
+            test -s outputs/physionet/predictions.csv
+            grep -q "REAL DATA SELECTOR AUDIT" outputs/physionet/RUN_COMPLETE.txt
+          else
+            python ffseeg_physionet/topk_selector_audit.py \
+              --data uci --uci-zip input/uci_original.zip \
+              --out outputs/uci --epochs 65 --seeds 24701 24702 \
+              2>&1 | tee training.log
+            test -s outputs/uci/selection_audit.csv
+            test -s outputs/uci/predictions.csv
+            grep -q "REAL DATA SELECTOR AUDIT" outputs/uci/RUN_COMPLETE.txt
+          fi
+      - name: Audit experiment hashes
+        if: always()
+        shell: bash
+        run: |
+          find outputs -type f -print0 2>/dev/null | sort -z | xargs -0 -r sha256sum > SHA256SUMS.txt
+      - name: Preserve predictions diagnostics and audit logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: selector_audit_${{ matrix.dataset }}
+          path: |
+            outputs/
+            training.log
+            input_sha256.txt
+            SHA256SUMS.txt
+          retention-days: 30
+          if-no-files-found: warn
