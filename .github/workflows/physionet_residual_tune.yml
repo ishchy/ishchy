@@ -52,14 +52,24 @@ jobs:
       - name: Run reproducible 109-subject 10-fold sparse residual EEG GNN
         run: |
           set -o pipefail
+          for seed in 24701 24702 24703; do
+            python ffseeg_physionet/physionet_sparse_residual.py \
+              --dataset input/outputs/physionet_full/external_features.csv \
+              --splits input/outputs/physionet_full/external_subject_splits.csv \
+              --baseline input/outputs/physionet_full/external_oof_predictions.csv \
+              --out "outputs/ffseeg_residual_seed$seed" --folds 10 \
+              --variant residual --k 8 --seed "$seed" \
+              2>&1 | tee "residual_seed$seed.log"
+            test -f "outputs/ffseeg_residual_seed$seed/metrics_summary.json"
+          done
           python ffseeg_physionet/physionet_sparse_residual.py \
             --dataset input/outputs/physionet_full/external_features.csv \
             --splits input/outputs/physionet_full/external_subject_splits.csv \
             --baseline input/outputs/physionet_full/external_oof_predictions.csv \
-            --out outputs/ffseeg_residual --folds 10 \
-            --variant residual --k 8 --seed 24701 \
-            2>&1 | tee residual_benchmark.log
-          test -f outputs/ffseeg_residual/metrics_summary.json
+            --out outputs/ffseeg_noresidual_seed24701 --folds 10 \
+            --variant noresidual --k 8 --seed 24701 \
+            2>&1 | tee noresidual_seed24701.log
+          test -f outputs/ffseeg_noresidual_seed24701/metrics_summary.json
       - name: Audit output hashes
         if: always()
         run: |
@@ -68,10 +78,11 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ffseeg_residual_109subjects_10fold
+          name: ffseeg_residual_multiseed_ablation
           path: |
             outputs/ffseeg_residual/
-            residual_benchmark.log
+            residual_seed*.log
+            noresidual_seed*.log
             SHA256SUMS.txt
           if-no-files-found: warn
           retention-days: 30
