@@ -1,0 +1,86 @@
+name: EEGMMIDB R04 R08 R12 independent motor imagery strong baselines
+
+on:
+  push:
+    branches:
+      - "experiments/mi-three-run-strongbaselines-*"
+    paths:
+      - ".github/workflows/eeg_three_run_strongbaselines.yml"
+      - "ffseeg_physionet/three_run_motor_imagery.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  real-mi-strong-baselines:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      PYTHONUNBUFFERED: "1"
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+    steps:
+      - name: Check out exact submitted revision
+        uses: actions/checkout@v4
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install pinned runtime and decoding libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install \
+            numpy==1.26.4 scipy==1.14.1 pandas==2.2.3 \
+            scikit-learn==1.5.2 mne==1.10.2 edfio pyriemann==0.7
+          python -m pip freeze > PILOT_ENVIRONMENT.txt
+      - name: Static compile of the real experiment
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m py_compile ffseeg_physionet/three_run_motor_imagery.py
+      - name: Real 8-subject 3-run EDF/event/partition preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          python ffseeg_physionet/three_run_motor_imagery.py \
+            --subject-end 8 --folds 4 --epochs 65 \
+            --workers 4 --cache-dir cache/edf \
+            --out outputs/preflight --smoke 2>&1 | tee preflight.log
+          grep -q "SMOKE-REAL-EDF-OK" preflight.log
+          test -s outputs/preflight/edf_audit.csv
+          test -s outputs/preflight/splits.csv
+      - name: 24-subject 4-fold 8-model real EDF pilot
+        shell: bash
+        run: |
+          set -euo pipefail
+          python ffseeg_physionet/three_run_motor_imagery.py \
+            --subject-end 24 --folds 4 --epochs 65 \
+            --workers 4 --cache-dir cache/edf \
+            --out outputs/real24 2>&1 | tee full.log
+          test -s outputs/real24/fold_summary.csv
+          test -s outputs/real24/oof_predictions.csv
+          test -s outputs/real24/paired_subject_exploratory.csv
+          grep -q "TRUE EDF THREE-RUN LEFT RIGHT IMAGERY" outputs/real24/RUN_COMPLETE.txt
+      - name: Create SHA256 integrity record
+        if: always()
+        shell: bash
+        run: |
+          find outputs -type f -print0 2>/dev/null | sort -z | xargs -0 -r sha256sum > SHA256SUMS.txt
+      - name: Preserve real data summaries, labels, waveforms and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eeg_3run_24subjects_8models
+          path: |
+            outputs/
+            PILOT_ENVIRONMENT.txt
+            preflight.log
+            full.log
+            SHA256SUMS.txt
+          retention-days: 30
+          if-no-files-found: warn

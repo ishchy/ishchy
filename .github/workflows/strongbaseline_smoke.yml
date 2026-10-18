@@ -1,0 +1,37 @@
+name: Validate EEG strong-baseline APIs without test EEG
+on:
+  push:
+    branches: ["experiments/mi-three-run-strongbaselines-*"]
+    paths: [".github/workflows/strongbaseline_smoke.yml","ffseeg_physionet/smoke_strong_baselines.py"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  api-check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      PYTHONUNBUFFERED: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install experiment dependencies
+        run: |
+          pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+          pip install numpy==1.26.4 scipy==1.14.1 pandas==2.2.3 scikit-learn==1.5.2 mne==1.10.2 edfio pyriemann==0.7
+      - name: Verify CSP, FBCSP, Riemann, EEGNet, MI-InputGraph, TopK API shapes (not EEG accuracy)
+        run: |
+          set -euo pipefail
+          python ffseeg_physionet/smoke_strong_baselines.py 2>&1 | tee api_check.log
+          grep -q ALL_DATA_FREE_SMOKE_TESTS_PASSED api_check.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eeg-strict-smoke-test-log
+          path: api_check.log
+          retention-days: 30
