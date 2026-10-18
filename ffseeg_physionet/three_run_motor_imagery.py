@@ -138,7 +138,11 @@ def one_record(entry):
     observed=dict(zip(*np.unique(events[:,2],return_counts=True))) if len(events) else {}
     print("EVENT_AUDIT",subject,run,"annotations",annotation_counts,
           "T1_T2",observed,"n",len(events),flush=True)
-    if len(events)<8 or set(events[:,2])!={1,2}:
+    # Real EEGMMIDB records need not all contain 15 imagery cues. For example,
+    # S013/R12 has four genuine T1/T2 events (2+2) in its original EDF.
+    # Retain ALL verified recordings and ALL available event labels. No
+    # resampling or padding of the short run is permitted.
+    if len(events)<2 or set(events[:,2])!={1,2}:
         raise ValueError(
             f"EDF has invalid T1/T2 imagery annotations S{subject}/R{run}; "
             f"original_annotation_counts={annotation_counts}, mapped_counts={observed}, "
@@ -158,12 +162,17 @@ def one_record(entry):
         records.append(filtered[:,start:stop].copy())
         starts.append(int(sample))
     y=np.asarray(labels,dtype=np.int64)
-    if not records or np.min(np.bincount(y,minlength=2))<3:
+    if not records or np.min(np.bincount(y,minlength=2))<1:
         raise ValueError(f"Insufficient left/right events S{subject}/R{run}")
     waves=np.stack(records).astype(np.float32)
     if waves.shape[1:]!=(14,SAMPLES) or not np.isfinite(waves).all():
         raise ValueError(f"Invalid waveform shape S{subject}/R{run}")
     row=dict(subject=int(subject),run=int(run),n_events=int(len(y)),
+             n_events_annotated=int(len(events)),
+             original_T0_events=int(annotation_counts.get("T0",0)),
+             original_T1_events=int(annotation_counts.get("T1",0)),
+             original_T2_events=int(annotation_counts.get("T2",0)),
+             is_short_run=bool(len(events)<15),
              n_left=int((y==0).sum()),n_right=int((y==1).sum()),
              events_out_of_bounds=int(dropped),
              edf_sha256=hashlib.sha256(edf.read_bytes()).hexdigest(),
@@ -176,7 +185,7 @@ def acquire_dataset(subjects,cache,workers=4):
     # Parallel HTTP transfers are fine, but EDF event parsing and MNE reads
     # are deliberately SERIAL to avoid concurrent-library state/annotation issues.
     # No subject or run may be silently skipped, even on source abnormalities.
-    with ThreadPoolExecutor(max_workers=min(workers,2)) as pool:
+    with ThreadPoolExecutor(max_workers=min(workers,4)) as pool:
         futures=[pool.submit(download_edf,cache,subject,run)
                  for subject,run,_ in input_items]
         for future in as_completed(futures):
@@ -184,7 +193,8 @@ def acquire_dataset(subjects,cache,workers=4):
     for entry in input_items:
         res=one_record(entry)
         out.append(res)
-        print("EDF-OK",res[0],res[1],len(res[3]),flush=True)
+        print("EDF-OK",res[0],res[1],len(res[3]),
+              "short_run",bool(res[-1]["is_short_run"]),flush=True)
     out.sort(key=lambda it:(it[0],it[1]))
     waves=np.concatenate([r[2] for r in out],axis=0)
     y=np.concatenate([r[3] for r in out],axis=0)
@@ -526,6 +536,9 @@ def main():
                   task="Imagined left T1 versus right T2 in R04/R08/R12",
                   runs=RUNS,subjects=int(table.subject.nunique()),
                   n_real_epochs=int(len(table)),sampling_rate=SFREQ,
+                  data_quality_policy="Include every genuine T1/T2 cue from every verified original EDF; allow unequal genuine event counts and annotate short EDF runs; never pad or synthesise tasks",
+                  n_short_runs=int(audit.is_short_run.sum()),
+                  short_runs=audit.loc[audit.is_short_run,["subject","run","n_events","n_left","n_right"]].to_dict("records"),
                   channel_names=CHANNELS,n_samples_per_epoch=SAMPLES,
                   time_window_after_cue_seconds=[.5,2.5],
                   frequency_bands=FEATURE_BANDS,models=MODELS,folds=args.folds,
