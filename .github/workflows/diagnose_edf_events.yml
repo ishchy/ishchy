@@ -1,0 +1,32 @@
+name: Diagnose original EEGMMIDB T1/T2 event annotations
+on:
+  push:
+    branches: ["experiments/mi-three-run-strongbaselines-*"]
+    paths: [".github/workflows/diagnose_edf_events.yml","ffseeg_physionet/diag_three_run_annotations.py"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  annotations:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install MNE and EDF backend
+        run: pip install mne==1.10.2 edfio
+      - name: Inspect original EDF annotation dictionary and mapped events without training
+        run: |
+          set -euo pipefail
+          python ffseeg_physionet/diag_three_run_annotations.py 2>&1 | tee edf_annotation_diagnostics.log
+          grep -q 'ANNOTATION_AUDIT_COMPLETE' edf_annotation_diagnostics.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: original-edf-annotation-diagnostics
+          path: |
+            audit_edf/annotation_audit.json
+            edf_annotation_diagnostics.log
+          retention-days: 30
