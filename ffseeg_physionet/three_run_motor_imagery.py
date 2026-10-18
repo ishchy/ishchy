@@ -52,13 +52,31 @@ SEED = 34179
 def fix_seed(seed):
     random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
 
+# Prior successful subject-24 R04 EDF bytes from run 38740937352 are
+# pinned as a provenance check. A mismatch is a source integrity error.
+KNOWN_R04_HASHES=json.loads(
+    Path(__file__).with_name("verified_r04_edf_hashes.json").read_text()
+)["known_sha256"]
+
 def download_edf(cache: Path, subject: int, run: int):
     code=f"S{subject:03d}"
     name=f"{code}R{run:02d}.edf"
     path=cache/code/name
     path.parent.mkdir(parents=True,exist_ok=True)
-    if path.is_file() and path.stat().st_size>100_000:
+    expected=KNOWN_R04_HASHES.get(name)
+    def valid_download(p):
+        if not (p.is_file() and p.stat().st_size>100_000):
+            return False
+        if expected:
+            observed=hashlib.sha256(p.read_bytes()).hexdigest()
+            if observed!=expected:
+                print("SOURCE_HASH_MISMATCH",name,"expected",expected,
+                      "observed",observed,flush=True)
+                return False
+        return True
+    if valid_download(path):
         return path
+    path.unlink(missing_ok=True)
     url=f"{BASE_URL}/{code}/{name}"
     for attempt in range(6):
         try:
@@ -66,12 +84,15 @@ def download_edf(cache: Path, subject: int, run: int):
                 "User-Agent":"Academic-EEG-CrossSubject-Pilot/1.0 (EEG analysis)"})
             tmp=path.with_suffix(".edf.partial")
             with urllib.request.urlopen(request,timeout=90) as response, tmp.open("wb") as out:
+                if response.status != 200:raise IOError(f"HTTP {response.status}")
                 while True:
                     chunk=response.read(1024*1024)
                     if not chunk:break
                     out.write(chunk)
-            if tmp.stat().st_size<100_000:raise IOError("Downloaded EDF too short")
+            if not valid_download(tmp):
+                raise IOError(f"EDF invalid or disagrees with prior verified SHA256: {name}")
             tmp.replace(path)
+            print("DOWNLOAD_VERIFIED",name,path.stat().st_size,flush=True)
             return path
         except Exception as ex:
             tmp.unlink(missing_ok=True)
@@ -104,16 +125,24 @@ def feature_bands(X):
 def one_record(entry):
     subject,run,cache=entry
     edf=download_edf(cache,subject,run)
-    raw=mne.io.read_raw_edf(str(edf),preload=True,verbose="ERROR")
+    raw=mne.io.read_raw_edf(str(edf),preload=False,verbose="ERROR")
     if not np.isclose(raw.info["sfreq"],SFREQ,atol=.001):
         raise ValueError(f"Unexpected sample rate {subject}/{run}: {raw.info['sfreq']}")
     available={normalized(name):name for name in raw.ch_names}
     missing=[ch for ch in CHANNELS if ch not in available]
     if missing:raise ValueError(f"Missing electrodes {subject}/{run}: {missing}")
     picks=[available[ch] for ch in CHANNELS]
+    annotation_counts=dict(zip(*np.unique(np.asarray(raw.annotations.description,dtype=str),
+                                         return_counts=True)))
     events,_=mne.events_from_annotations(raw,event_id={"T1":1,"T2":2},verbose="ERROR")
+    observed=dict(zip(*np.unique(events[:,2],return_counts=True))) if len(events) else {}
+    print("EVENT_AUDIT",subject,run,"annotations",annotation_counts,
+          "T1_T2",observed,"n",len(events),flush=True)
     if len(events)<8 or set(events[:,2])!={1,2}:
-        raise ValueError(f"EDF has invalid imagery annotations S{subject}/R{run}")
+        raise ValueError(
+            f"EDF has invalid T1/T2 imagery annotations S{subject}/R{run}; "
+            f"original_annotation_counts={annotation_counts}, mapped_counts={observed}, "
+            f"file_sha256={hashlib.sha256(edf.read_bytes()).hexdigest()}")
     # Filtering within each recording only, never across subjects.
     signal_uv=raw.get_data(picks=picks).astype(np.float32)*1e6
     filtered=signal_band(signal_uv,4.,40.)
@@ -144,12 +173,18 @@ def one_record(entry):
 def acquire_dataset(subjects,cache,workers=4):
     input_items=[(int(s),int(run),cache) for s in subjects for run in RUNS]
     out=[]
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        future_map={pool.submit(one_record,entry):entry for entry in input_items}
-        for future in as_completed(future_map):
-            res=future.result()
-            out.append(res)
-            print("EDF-OK",res[0],res[1],len(res[3]),flush=True)
+    # Parallel HTTP transfers are fine, but EDF event parsing and MNE reads
+    # are deliberately SERIAL to avoid concurrent-library state/annotation issues.
+    # No subject or run may be silently skipped, even on source abnormalities.
+    with ThreadPoolExecutor(max_workers=min(workers,2)) as pool:
+        futures=[pool.submit(download_edf,cache,subject,run)
+                 for subject,run,_ in input_items]
+        for future in as_completed(futures):
+            future.result()
+    for entry in input_items:
+        res=one_record(entry)
+        out.append(res)
+        print("EDF-OK",res[0],res[1],len(res[3]),flush=True)
     out.sort(key=lambda it:(it[0],it[1]))
     waves=np.concatenate([r[2] for r in out],axis=0)
     y=np.concatenate([r[3] for r in out],axis=0)
